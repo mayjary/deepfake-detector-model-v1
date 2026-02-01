@@ -17,8 +17,8 @@ A deepfake image detection web application built using a pretrained vision model
 ## Setup
 
 ```bash
-git clone https://github.com/mayjary/deepfake-detection.git
-cd deepfake-detection
+git clone https://github.com/mayjary/deepfake-detector-model-v1.git
+cd deepfake-detector-model-v1
 python -m venv hf_env
 source hf_env/bin/activate
 pip install -r requirements.txt
