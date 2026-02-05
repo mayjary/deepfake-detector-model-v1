@@ -3,7 +3,9 @@ import torch
 import sqlite3
 import bcrypt
 import os
+import cv2
 import hashlib
+import numpy as np
 from datetime import datetime
 from PIL import Image
 from transformers import AutoImageProcessor, AutoModelForImageClassification
@@ -100,6 +102,48 @@ def classify_image(image: Image.Image):
 
     return label, confidence
 
+def classify_video(video_path, frame_interval=30, max_frames=40):
+    cap = cv2.VideoCapture(video_path)
+    fake_scores, real_scores = [], []
+    frame_idx, used = 0, 0
+
+    while cap.isOpened() and used < max_frames:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_idx % frame_interval == 0:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(frame_rgb)
+            label, confidence = classify_image(image)
+
+            if label == "FAKE":
+                fake_scores.append(confidence)
+            elif label == "REAL":
+                real_scores.append(confidence)
+
+            used += 1
+
+        frame_idx += 1
+
+    cap.release()
+
+    if not fake_scores and not real_scores:
+        return "UNCERTAIN", 0.0
+
+    mean_fake = np.mean(fake_scores) if fake_scores else 0.0
+    mean_real = np.mean(real_scores) if real_scores else 0.0
+    confidence = max(mean_fake, mean_real)
+
+    if confidence < 0.6:
+        label = "UNCERTAIN"
+    elif mean_fake > mean_real:
+        label = "FAKE"
+    else:
+        label = "REAL"
+
+    return label, confidence
+
 def save_history(username, filepath, prediction, confidence):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -115,7 +159,7 @@ def save_history(username, filepath, prediction, confidence):
         ))
         conn.commit()
     except sqlite3.IntegrityError:
-        pass  # duplicate prevented
+        pass
     finally:
         conn.close()
 
@@ -135,15 +179,13 @@ def load_history(username):
 def delete_history_item(history_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
     c.execute("SELECT filepath FROM history WHERE id=?", (history_id,))
     row = c.fetchone()
 
     if row:
-        filepath = row[0]
-        if os.path.exists(filepath):
-            os.remove(filepath)
-
+        path = row[0]
+        if os.path.exists(path):
+            os.remove(path)
         c.execute("DELETE FROM history WHERE id=?", (history_id,))
         conn.commit()
 
@@ -152,18 +194,16 @@ def delete_history_item(history_id):
 def delete_all_history(username):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
     c.execute("SELECT filepath FROM history WHERE username=?", (username,))
     rows = c.fetchall()
 
-    for (filepath,) in rows:
-        if os.path.exists(filepath):
-            os.remove(filepath)
+    for (path,) in rows:
+        if os.path.exists(path):
+            os.remove(path)
 
     c.execute("DELETE FROM history WHERE username=?", (username,))
     conn.commit()
     conn.close()
-
 
 # ================= SESSION =================
 st.set_page_config("Deepfake Detector", "🕵️", layout="wide")
@@ -207,9 +247,8 @@ username = st.session_state.user
 user_dir = os.path.join(UPLOAD_DIR, username)
 os.makedirs(user_dir, exist_ok=True)
 
-# -------- SIDEBAR (HISTORY) --------
+# -------- SIDEBAR --------
 st.sidebar.title("📁 History")
-
 history = load_history(username)
 
 for hid, path, pred, conf, ts in history:
@@ -230,13 +269,15 @@ if st.sidebar.button("🗑️ Delete ALL history"):
     st.session_state.selected_id = None
     st.rerun()
 
-
-# -------- MAIN VIEW --------
+# -------- UPLOAD --------
 st.title("🕵️ Deepfake Detection Assistant")
 
-uploaded_file = st.file_uploader("Upload an image", ["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader(
+    "Upload image or video",
+    ["jpg", "jpeg", "png", "mp4", "mov", "avi"]
+)
 
-if uploaded_file is not None:
+if uploaded_file:
     data = uploaded_file.getvalue()
     h = file_hash(data)
 
@@ -247,23 +288,30 @@ if uploaded_file is not None:
         with open(filepath, "wb") as f:
             f.write(data)
 
-        image = Image.open(filepath).convert("RGB")
-        label, confidence = classify_image(image)
+        ext = uploaded_file.name.lower().split(".")[-1]
+
+        if ext in ["jpg", "jpeg", "png"]:
+            image = Image.open(filepath).convert("RGB")
+            label, confidence = classify_image(image)
+        else:
+            label, confidence = classify_video(filepath)
 
         save_history(username, filepath, label, confidence)
         st.session_state.processed_hashes.add(h)
         st.session_state.selected_id = None
-
         st.rerun()
 
-# -------- DISPLAY SELECTED ITEM --------
+# -------- DISPLAY --------
 if st.session_state.selected_id:
     for hid, path, pred, conf, ts in history:
         if hid == st.session_state.selected_id:
             if os.path.exists(path):
-                st.image(path, use_column_width=True)
+                if path.lower().endswith((".mp4", ".mov", ".avi")):
+                    st.video(path)
+                else:
+                    st.image(path, use_column_width=True)
             else:
-                st.warning("Image file not found")
+                st.warning("File not found")
 
             if pred == "REAL":
                 st.success("🟢 REAL")
